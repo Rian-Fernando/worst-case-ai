@@ -1,19 +1,20 @@
 import pickle
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from databases import Database
 import sqlalchemy
-import datetime
+from databases import Database
 import pandas as pd
+import datetime
 import logging
+import os
 
 logging.basicConfig(level=logging.INFO)
 
-DATABASE_URL = "sqlite:///conversation_history.db"
+# === DB CONFIG ===
+DATABASE_URL = "sqlite:///./conversation_history.db"
 database = Database(DATABASE_URL)
 metadata = sqlalchemy.MetaData()
 
-# Define your database table for storing conversation history
 conversations = sqlalchemy.Table(
     "conversations",
     metadata,
@@ -23,24 +24,27 @@ conversations = sqlalchemy.Table(
     sqlalchemy.Column("memory_usage", sqlalchemy.Float),
     sqlalchemy.Column("network_traffic", sqlalchemy.Float),
     sqlalchemy.Column("prediction", sqlalchemy.Integer),
-    sqlalchemy.Column("description", sqlalchemy.String)
+    sqlalchemy.Column("description", sqlalchemy.String),
 )
 
 engine = sqlalchemy.create_engine(DATABASE_URL)
 metadata.create_all(engine)
 
+# === APP START ===
 app = FastAPI()
 
-model_path = 'models/model.pkl'
-encoder_path = 'models/label_encoder.pkl'
+model_path = "models/model.pkl"
+encoder_path = "models/label_encoder.pkl"
 
-with open(model_path, 'rb') as f:
-    model = pickle.load(f)
-
-with open(encoder_path, 'rb') as f:
-    label_encoder = pickle.load(f)
-
-logging.info("✅ Model and Label Encoder loaded successfully!")
+try:
+    with open(model_path, "rb") as f:
+        model = pickle.load(f)
+    with open(encoder_path, "rb") as f:
+        label_encoder = pickle.load(f)
+    logging.info("✅ Model and Label Encoder loaded successfully!")
+except Exception as e:
+    logging.error(f"❌ Error loading model or encoder: {e}")
+    raise e
 
 class PredictionRequest(BaseModel):
     cpu_usage: float
@@ -55,31 +59,40 @@ async def startup():
 async def shutdown():
     await database.disconnect()
 
+@app.get("/")
+async def root():
+    return {"status": "🚀 API Running!"}
+
 @app.post("/predict/")
 async def predict(data: PredictionRequest):
-    input_data = pd.DataFrame([{
-        "CPU Usage (%)": data.cpu_usage,
-        "Memory Usage (%)": data.memory_usage,
-        "Network Traffic (B/s)": data.network_traffic
-    }])
-    prediction = model.predict(input_data)[0]
-    description = "⚠️ Scenario indicates a serious anomaly." if prediction == 1 else "✅ Scenario is normal."
+    try:
+        input_data = pd.DataFrame([{
+            "CPU Usage (%)": data.cpu_usage,
+            "Memory Usage (%)": data.memory_usage,
+            "Network Traffic (B/s)": data.network_traffic
+        }])
 
-    # Save prediction details to database
-    query = conversations.insert().values(
-        timestamp=str(datetime.datetime.now()),
-        cpu_usage=data.cpu_usage,
-        memory_usage=data.memory_usage,
-        network_traffic=data.network_traffic,
-        prediction=int(prediction),
-        description=description
-    )
-    await database.execute(query)
+        prediction = model.predict(input_data)[0]
+        description = "⚠️ Scenario indicates a serious anomaly." if prediction == 1 else "✅ Scenario is normal."
 
-    return {
-        "prediction": int(prediction),
-        "description": description
-    }
+        query = conversations.insert().values(
+            timestamp=str(datetime.datetime.now()),
+            cpu_usage=data.cpu_usage,
+            memory_usage=data.memory_usage,
+            network_traffic=data.network_traffic,
+            prediction=int(prediction),
+            description=description
+        )
+        await database.execute(query)
+
+        return {
+            "prediction": int(prediction),
+            "description": description
+        }
+
+    except Exception as e:
+        logging.error(f"❌ Prediction Error: {e}")
+        raise HTTPException(status_code=500, detail="Prediction failed.")
 
 @app.post("/solutions/")
 async def solutions(data: PredictionRequest):
@@ -107,7 +120,3 @@ async def solutions(data: PredictionRequest):
         "solutions": solutions,
         "resources": resources
     }
-
-@app.get("/")
-async def root():
-    return {"status": "🚀 API Running!"}
