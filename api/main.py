@@ -1,92 +1,105 @@
-# api/main.py
-
-from fastapi import FastAPI, HTTPException, Request, Header
-from pydantic import BaseModel
-from fastapi.responses import JSONResponse
-import numpy as np
-import joblib
 import os
-import sqlite3
+import json
+import joblib
+import datetime
+from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import databases
 
+# Constants
+MODEL_PATH = "models/failure_model.pkl"
+ENCODER_PATH = "models/label_encoder.pkl"
+DATABASE_URL = "sqlite:///./conversation_history.db"
+API_KEY = "rian-secret-key"  # Simple token for now
+
+# Database connection
+database = databases.Database(DATABASE_URL)
+
+# FastAPI app setup
 app = FastAPI()
 
-# Load the trained model and encoder
-model_path = "models/logistic_model.pkl"
-encoder_path = "models/label_encoder.pkl"
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
 
+# Load model and encoder
 try:
-    model = joblib.load(model_path)
-    encoder = joblib.load(encoder_path)
+    with open(MODEL_PATH, "rb") as f:
+        model = joblib.load(f)
+    with open(ENCODER_PATH, "rb") as f:
+        encoder = joblib.load(f)
     print("✅ Model and Label Encoder loaded successfully!")
 except Exception as e:
     print(f"❌ Error loading model or encoder: {e}")
     raise e
 
-# Input model
+# Input schema
 class InputData(BaseModel):
     cpu_usage: float
     memory_usage: float
     network_traffic: float
 
-# API Key verification
-API_KEY = "rian-secret-key"
+# Connect to DB on startup
+@app.on_event("startup")
+async def startup():
+    await database.connect()
 
+# Disconnect from DB on shutdown
+@app.on_event("shutdown")
+async def shutdown():
+    await database.disconnect()
+
+# Prediction route
 @app.post("/predict/")
 async def predict(data: InputData, access_token: str = Header(...)):
     if access_token != API_KEY:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        raise HTTPException(status_code=403, detail="Invalid access token")
 
-    try:
-        # Convert input to numpy array
-        features = np.array([[data.cpu_usage, data.memory_usage, data.network_traffic]])
-        prediction = model.predict(features)[0]
-        decoded = encoder.inverse_transform([prediction])[0]
+    features = [[data.cpu_usage, data.memory_usage, data.network_traffic]]
+    prediction = model.predict(features)[0]
+    label = encoder.inverse_transform([prediction])[0]
 
-        # Description
-        description = (
-            "✅ Scenario looks stable."
-            if prediction == 0
-            else "⚠️ Scenario indicates a serious anomaly."
-        )
+    description = {
+        0: "✅ System operating normally.",
+        1: "⚠️ Scenario indicates a serious anomaly.",
+        2: "🚨 Worst-case failure likely imminent!"
+    }.get(prediction, "Unknown result")
 
-        # Save to database
-        conn = sqlite3.connect("conversation_history.db")
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO conversation_history (user_input, prediction, description)
-            VALUES (?, ?, ?)
-        ''', (f"{data.dict()}", int(prediction), description))
-        conn.commit()
-        conn.close()
+    # Save to DB
+    user_input = json.dumps(data.dict())
+    query = "INSERT INTO predictions (user_input, prediction, description, timestamp) VALUES (:user_input, :prediction, :description, :timestamp)"
+    values = {
+        "user_input": user_input,
+        "prediction": int(prediction),
+        "description": description,
+        "timestamp": datetime.datetime.utcnow().isoformat()
+    }
+    await database.execute(query=query, values=values)
 
-        return {"prediction": int(prediction), "description": description}
+    return {"prediction": int(prediction), "description": description}
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
+# View prediction history
 @app.get("/history/")
 async def get_history(access_token: str = Header(...)):
     if access_token != API_KEY:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        raise HTTPException(status_code=403, detail="Invalid access token")
 
-    try:
-        conn = sqlite3.connect("conversation_history.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM conversation_history ORDER BY timestamp DESC")
-        rows = cursor.fetchall()
-        conn.close()
+    query = "SELECT * FROM predictions ORDER BY timestamp DESC"
+    rows = await database.fetch_all(query)
 
-        # Format as list of dicts
-        history = []
-        for row in rows:
-            history.append({
-                "id": row[0],
-                "user_input": row[1],
-                "prediction": row[2],
-                "description": row[3],
-                "timestamp": row[4],
-            })
-        return {"history": history}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    history = [
+        {
+            "id": row["id"],
+            "user_input": row["user_input"],
+            "prediction": row["prediction"],
+            "description": row["description"],
+            "timestamp": row["timestamp"]
+        }
+        for row in rows
+    ]
+
+    return {"history": history}
