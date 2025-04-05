@@ -4,3 +4,4 @@ venv/
 .env
 .DS_Store
 .ipynb_checkpoints/
+!models/label_encoder.pkl
