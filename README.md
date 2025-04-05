@@ -60,3 +60,18 @@ POST `/predict`
 }
 ```
 
+
+---
+
+## 🧪 Tests
+
+Run tests with:
+
+```bash
+pytest WCSAI/tests/
+```
+
+## 📊 Notebooks
+
+Explore the data in [WCSAI/notebooks/EDA.ipynb](WCSAI/notebooks/EDA.ipynb)
+
