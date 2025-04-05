@@ -39,3 +39,24 @@ POST
 }
 ```
 
+
+## API Endpoint
+
+POST `/predict`
+
+### Request
+```json
+{
+  "feature1": 85.0,
+  "feature2": 70.5,
+  "feature3": 3
+}
+```
+
+### Response
+```json
+{
+  "prediction": "Running"
+}
+```
+
