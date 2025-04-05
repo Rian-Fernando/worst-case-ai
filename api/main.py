@@ -1,90 +1,113 @@
 import pickle
-import logging
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from databases import Database
+import sqlalchemy
+import datetime
 import pandas as pd
+import logging
 
 logging.basicConfig(level=logging.INFO)
+
+DATABASE_URL = "sqlite:///conversation_history.db"
+database = Database(DATABASE_URL)
+metadata = sqlalchemy.MetaData()
+
+# Define your database table for storing conversation history
+conversations = sqlalchemy.Table(
+    "conversations",
+    metadata,
+    sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
+    sqlalchemy.Column("timestamp", sqlalchemy.String),
+    sqlalchemy.Column("cpu_usage", sqlalchemy.Float),
+    sqlalchemy.Column("memory_usage", sqlalchemy.Float),
+    sqlalchemy.Column("network_traffic", sqlalchemy.Float),
+    sqlalchemy.Column("prediction", sqlalchemy.Integer),
+    sqlalchemy.Column("description", sqlalchemy.String)
+)
+
+engine = sqlalchemy.create_engine(DATABASE_URL)
+metadata.create_all(engine)
 
 app = FastAPI()
 
 model_path = 'models/model.pkl'
 encoder_path = 'models/label_encoder.pkl'
 
-# Load model and encoder
-def load_objects():
-    try:
-        with open(model_path, 'rb') as model_file, open(encoder_path, 'rb') as encoder_file:
-            model = pickle.load(model_file)
-            label_encoder = pickle.load(encoder_file)
-        logging.info("✅ Model and Label Encoder loaded successfully!")
-        return model, label_encoder
-    except Exception as e:
-        logging.error(f"❌ Error loading objects: {e}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
+with open(model_path, 'rb') as f:
+    model = pickle.load(f)
 
-model, label_encoder = load_objects()
+with open(encoder_path, 'rb') as f:
+    label_encoder = pickle.load(f)
+
+logging.info("✅ Model and Label Encoder loaded successfully!")
 
 class PredictionRequest(BaseModel):
     cpu_usage: float
     memory_usage: float
     network_traffic: float
 
-@app.get("/")
-def read_root():
-    return {"message": "🚀 Worst-case scenario prediction AI is ready!"}
+@app.on_event("startup")
+async def startup():
+    await database.connect()
+
+@app.on_event("shutdown")
+async def shutdown():
+    await database.disconnect()
 
 @app.post("/predict/")
-async def predict(request: PredictionRequest):
-    try:
-        input_data = pd.DataFrame([{
-            "CPU Usage (%)": request.cpu_usage,
-            "Memory Usage (%)": request.memory_usage,
-            "Network Traffic (B/s)": request.network_traffic
-        }])
-
-        prediction = model.predict(input_data)[0]
-        prediction_label = label_encoder.inverse_transform([prediction])[0]
-
-        description = "✅ Scenario is safe." if prediction_label == 0 else "⚠️ Scenario indicates a serious anomaly."
-
-        response = {
-            "prediction": int(prediction),
-            "description": description
-        }
-
-        logging.info(f"Prediction response: {response}")
-        return response
-
-    except Exception as e:
-        logging.error(f"❌ Prediction Error: {e}")
-        raise HTTPException(status_code=500, detail="Prediction failed.")
-
-# New endpoint for providing solutions
-@app.post("/solutions/")
-async def solutions(request: PredictionRequest):
+async def predict(data: PredictionRequest):
     input_data = pd.DataFrame([{
-        "CPU Usage (%)": request.cpu_usage,
-        "Memory Usage (%)": request.memory_usage,
-        "Network Traffic (B/s)": request.network_traffic
+        "CPU Usage (%)": data.cpu_usage,
+        "Memory Usage (%)": data.memory_usage,
+        "Network Traffic (B/s)": data.network_traffic
     }])
-
     prediction = model.predict(input_data)[0]
+    description = "⚠️ Scenario indicates a serious anomaly." if prediction == 1 else "✅ Scenario is normal."
 
-    if prediction == 0:
-        return {
-            "solutions": ["No immediate action needed. Continue monitoring."],
-            "resources": ["https://www.monitoring-guide.com/general-tips"]
-        }
+    # Save prediction details to database
+    query = conversations.insert().values(
+        timestamp=str(datetime.datetime.now()),
+        cpu_usage=data.cpu_usage,
+        memory_usage=data.memory_usage,
+        network_traffic=data.network_traffic,
+        prediction=int(prediction),
+        description=description
+    )
+    await database.execute(query)
+
+    return {
+        "prediction": int(prediction),
+        "description": description
+    }
+
+@app.post("/solutions/")
+async def solutions(data: PredictionRequest):
+    prediction = model.predict(pd.DataFrame([{
+        "CPU Usage (%)": data.cpu_usage,
+        "Memory Usage (%)": data.memory_usage,
+        "Network Traffic (B/s)": data.network_traffic
+    }]))[0]
+
+    if prediction == 1:
+        solutions = [
+            "Restart affected services immediately.",
+            "Check and reduce the load on CPU and memory.",
+            "Inspect recent network traffic for unusual spikes."
+        ]
+        resources = [
+            "https://docs.system-admin-guides.com/anomaly-handling",
+            "https://docs.troubleshoot-cpu-memory.com"
+        ]
     else:
-        return {
-            "solutions": [
-                "Restart affected services immediately.",
-                "Check and reduce the load on CPU and memory.",
-                "Inspect recent network traffic for unusual spikes."
-            ],
-            "resources": [
-                "https://docs.system-admin-guides.com/anomaly-handling",
-                "https://docs.troubleshoot-cpu-memory.com"
-            ]
-        }
+        solutions = ["No action required."]
+        resources = []
+
+    return {
+        "solutions": solutions,
+        "resources": resources
+    }
+
+@app.get("/")
+async def root():
+    return {"status": "🚀 API Running!"}
