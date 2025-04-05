@@ -1,13 +1,41 @@
-# Worst Case AI – Failure Prediction & Fault Injection Analysis
+# Worst Case AI 🚨
 
-🚨 **WCSAI** is a project focused on predicting system failures and analyzing fault injection datasets across distributed systems like OpenStack, Kubernetes, and robotics.
+This AI predicts worst-case system scenarios using failure data and returns predictions via a FastAPI interface.
 
-## 🔧 Features
+## Features
+- Reads synthetic and real failure datasets
+- Trains logistic regression model
+- Exposes  endpoint via FastAPI
+- Accepts JSON input and returns failure predictions
 
-- Predictive model (`.h5`) trained on real failure datasets
-- Data preprocessing & visualization tools
-- AI-backed analysis and reporting (OpenAI integration planned)
-- Modular script structure for training, predicting, and visualization
+## How to Run
+1. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. Train the model:
+   ```bash
+   python3 train.py
+   ```
+3. Run API:
+   ```bash
+   uvicorn main:app --reload
+   ```
 
-## 📁 Project Structure
+## Example Request
+POST 
+```json
+{
+  "feature1": 85.0,
+  "feature2": 70.5,
+  "feature3": 3
+}
+```
+
+## Output
+```json
+{
+  "prediction": "Running"
+}
+```
 
