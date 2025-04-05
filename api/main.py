@@ -1,105 +1,62 @@
-import os
-import json
-import joblib
-import datetime
-from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import databases
+import joblib
+import os
+import numpy as np
 
-# Constants
-MODEL_PATH = "models/failure_model.pkl"
-ENCODER_PATH = "models/label_encoder.pkl"
-DATABASE_URL = "sqlite:///./conversation_history.db"
-API_KEY = "rian-secret-key"  # Simple token for now
-
-# Database connection
-database = databases.Database(DATABASE_URL)
-
-# FastAPI app setup
+# Initialize FastAPI app
 app = FastAPI()
 
+# Allow all CORS origins (you can restrict this later)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # You can specify frontend URL here instead of "*"
+    allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"]
+    allow_headers=["*"],
 )
 
-# Load model and encoder
+# Define model and encoder paths
+MODEL_PATH = os.path.join("models", "model.pkl")
+ENCODER_PATH = os.path.join("models", "label_encoder.pkl")
+
+# Load the model and label encoder
 try:
-    with open(MODEL_PATH, "rb") as f:
-        model = joblib.load(f)
-    with open(ENCODER_PATH, "rb") as f:
-        encoder = joblib.load(f)
+    model = joblib.load(MODEL_PATH)
+    label_encoder = joblib.load(ENCODER_PATH)
     print("✅ Model and Label Encoder loaded successfully!")
 except Exception as e:
-    print(f"❌ Error loading model or encoder: {e}")
-    raise e
+    print(f"❌ Failed to load model or encoder: {e}")
+    raise
 
-# Input schema
-class InputData(BaseModel):
-    cpu_usage: float
-    memory_usage: float
-    network_traffic: float
+# Root endpoint (just for checking the backend is up)
+@app.get("/")
+def read_root():
+    return {"message": "Worst-case AI backend is live 🚀"}
 
-# Connect to DB on startup
-@app.on_event("startup")
-async def startup():
-    await database.connect()
+# Predict endpoint
+@app.post("/predict")
+def predict(features: dict):
+    try:
+        # Ensure required keys exist
+        required_keys = ["CPU Usage (%)", "Memory Usage (%)", "Network Traffic (B/s)"]
+        for key in required_keys:
+            if key not in features:
+                raise HTTPException(status_code=400, detail=f"Missing input: {key}")
 
-# Disconnect from DB on shutdown
-@app.on_event("shutdown")
-async def shutdown():
-    await database.disconnect()
+        # Extract and prepare input data
+        input_data = [
+            features["CPU Usage (%)"],
+            features["Memory Usage (%)"],
+            features["Network Traffic (B/s)"]
+        ]
 
-# Prediction route
-@app.post("/predict/")
-async def predict(data: InputData, access_token: str = Header(...)):
-    if access_token != API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid access token")
+        # Reshape and predict
+        input_array = np.array(input_data).reshape(1, -1)
+        prediction = model.predict(input_array)[0]
+        decoded_label = label_encoder.inverse_transform([prediction])[0]
 
-    features = [[data.cpu_usage, data.memory_usage, data.network_traffic]]
-    prediction = model.predict(features)[0]
-    label = encoder.inverse_transform([prediction])[0]
-
-    description = {
-        0: "✅ System operating normally.",
-        1: "⚠️ Scenario indicates a serious anomaly.",
-        2: "🚨 Worst-case failure likely imminent!"
-    }.get(prediction, "Unknown result")
-
-    # Save to DB
-    user_input = json.dumps(data.dict())
-    query = "INSERT INTO predictions (user_input, prediction, description, timestamp) VALUES (:user_input, :prediction, :description, :timestamp)"
-    values = {
-        "user_input": user_input,
-        "prediction": int(prediction),
-        "description": description,
-        "timestamp": datetime.datetime.utcnow().isoformat()
-    }
-    await database.execute(query=query, values=values)
-
-    return {"prediction": int(prediction), "description": description}
-
-# View prediction history
-@app.get("/history/")
-async def get_history(access_token: str = Header(...)):
-    if access_token != API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid access token")
-
-    query = "SELECT * FROM predictions ORDER BY timestamp DESC"
-    rows = await database.fetch_all(query)
-
-    history = [
-        {
-            "id": row["id"],
-            "user_input": row["user_input"],
-            "prediction": row["prediction"],
-            "description": row["description"],
-            "timestamp": row["timestamp"]
-        }
-        for row in rows
-    ]
-
-    return {"history": history}
+        return {"worst_case": decoded_label}
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
