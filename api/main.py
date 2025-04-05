@@ -1,55 +1,40 @@
 import pickle
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-import sqlalchemy
-from databases import Database
+import numpy as np
 import pandas as pd
-import datetime
+from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security.api_key import APIKeyHeader
+from pydantic import BaseModel
 import logging
+from databases import Database
 import os
 
+# ====== Logging Setup ======
 logging.basicConfig(level=logging.INFO)
 
-# === DB CONFIG ===
-DATABASE_URL = "sqlite:///./conversation_history.db"
-database = Database(DATABASE_URL)
-metadata = sqlalchemy.MetaData()
-
-conversations = sqlalchemy.Table(
-    "conversations",
-    metadata,
-    sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
-    sqlalchemy.Column("timestamp", sqlalchemy.String),
-    sqlalchemy.Column("cpu_usage", sqlalchemy.Float),
-    sqlalchemy.Column("memory_usage", sqlalchemy.Float),
-    sqlalchemy.Column("network_traffic", sqlalchemy.Float),
-    sqlalchemy.Column("prediction", sqlalchemy.Integer),
-    sqlalchemy.Column("description", sqlalchemy.String),
-)
-
-engine = sqlalchemy.create_engine(DATABASE_URL)
-metadata.create_all(engine)
-
-# === APP START ===
+# ====== FastAPI Init ======
 app = FastAPI()
 
-model_path = "models/model.pkl"
-encoder_path = "models/label_encoder.pkl"
+# ====== CORS Middleware ======
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # You can limit this to your frontend URL
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-try:
-    with open(model_path, "rb") as f:
-        model = pickle.load(f)
-    with open(encoder_path, "rb") as f:
-        label_encoder = pickle.load(f)
-    logging.info("✅ Model and Label Encoder loaded successfully!")
-except Exception as e:
-    logging.error(f"❌ Error loading model or encoder: {e}")
-    raise e
+# ====== API Key Protection ======
+API_KEY = "rian-secret-key"
+API_KEY_NAME = "access-token"
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 
-class PredictionRequest(BaseModel):
-    cpu_usage: float
-    memory_usage: float
-    network_traffic: float
+async def verify_api_key(api_key: str = Depends(api_key_header)):
+    if api_key != API_KEY:
+        raise HTTPException(status_code=403, detail="❌ Invalid or missing API Key")
+
+# ====== Database Connection ======
+database = Database("sqlite:///./conversation_history.db")
 
 @app.on_event("startup")
 async def startup():
@@ -59,64 +44,44 @@ async def startup():
 async def shutdown():
     await database.disconnect()
 
-@app.get("/")
-async def root():
-    return {"status": "🚀 API Running!"}
+# ====== Load Model and Encoder ======
+model_path = "models/model.pkl"
+encoder_path = "models/label_encoder.pkl"
 
-@app.post("/predict/")
-async def predict(data: PredictionRequest):
+try:
+    with open(model_path, "rb") as f:
+        model = pickle.load(f)
+    with open(encoder_path, "rb") as f:
+        encoder = pickle.load(f)
+    logging.info("✅ Model and Label Encoder loaded successfully!")
+except Exception as e:
+    logging.error(f"❌ Error loading model or encoder: {e}")
+    raise e
+
+# ====== Pydantic Data Model ======
+class DataModel(BaseModel):
+    CPU_Usage: float
+    Memory_Usage: float
+    Network_Traffic: float
+
+# ====== Prediction Endpoint ======
+@app.post("/predict", dependencies=[Depends(verify_api_key)])
+async def predict(data: DataModel):
     try:
-        input_data = pd.DataFrame([{
-            "CPU Usage (%)": data.cpu_usage,
-            "Memory Usage (%)": data.memory_usage,
-            "Network Traffic (B/s)": data.network_traffic
+        df = pd.DataFrame([{
+            "CPU Usage (%)": data.CPU_Usage,
+            "Memory Usage (%)": data.Memory_Usage,
+            "Network Traffic (B/s)": data.Network_Traffic
         }])
 
-        prediction = model.predict(input_data)[0]
-        description = "⚠️ Scenario indicates a serious anomaly." if prediction == 1 else "✅ Scenario is normal."
-
-        query = conversations.insert().values(
-            timestamp=str(datetime.datetime.now()),
-            cpu_usage=data.cpu_usage,
-            memory_usage=data.memory_usage,
-            network_traffic=data.network_traffic,
-            prediction=int(prediction),
-            description=description
-        )
-        await database.execute(query)
+        prediction = model.predict(df)
+        prediction_label = encoder.inverse_transform(prediction)[0]
 
         return {
-            "prediction": int(prediction),
-            "description": description
+            "prediction": int(prediction[0]),
+            "label": prediction_label
         }
 
     except Exception as e:
-        logging.error(f"❌ Prediction Error: {e}")
+        logging.error(f"Prediction error: {e}")
         raise HTTPException(status_code=500, detail="Prediction failed.")
-
-@app.post("/solutions/")
-async def solutions(data: PredictionRequest):
-    prediction = model.predict(pd.DataFrame([{
-        "CPU Usage (%)": data.cpu_usage,
-        "Memory Usage (%)": data.memory_usage,
-        "Network Traffic (B/s)": data.network_traffic
-    }]))[0]
-
-    if prediction == 1:
-        solutions = [
-            "Restart affected services immediately.",
-            "Check and reduce the load on CPU and memory.",
-            "Inspect recent network traffic for unusual spikes."
-        ]
-        resources = [
-            "https://docs.system-admin-guides.com/anomaly-handling",
-            "https://docs.troubleshoot-cpu-memory.com"
-        ]
-    else:
-        solutions = ["No action required."]
-        resources = []
-
-    return {
-        "solutions": solutions,
-        "resources": resources
-    }
