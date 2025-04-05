@@ -1,9 +1,10 @@
 services:
   - type: web
-    name: worst-case-ai
+    name: worst-case-ai-backend
     env: python
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "uvicorn api:app --host 0.0.0.0 --port 10000"
-    envVars:
-      - key: OPENAI_API_KEY
-        value: ${OPENAI_API_KEY}
+    startCommand: "uvicorn api.main:app --host 0.0.0.0 --port 10000"
+    instances: 1
+    plan: free
+    disk: 1GB
+    region: oregon
